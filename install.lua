@@ -29,11 +29,45 @@ local function fetch(path)
     f.close()
 end
 
+-- Custom line reader: pulls char/key events directly. Avoids relying on
+-- read(), which behaves inconsistently when scripts are launched via
+-- `wget run` on some CC: Tweaked builds (no input echo, returns empty).
+local function readLine()
+    term.setCursorBlink(true)
+    local s = ""
+    while true do
+        local event, p1 = os.pullEvent()
+        if event == "char" then
+            s = s .. p1
+            term.write(p1)
+        elseif event == "key" then
+            if p1 == keys.enter then
+                break
+            elseif p1 == keys.backspace and #s > 0 then
+                s = s:sub(1, -2)
+                local x, y = term.getCursorPos()
+                term.setCursorPos(x - 1, y)
+                term.write(" ")
+                term.setCursorPos(x - 1, y)
+            end
+        elseif event == "paste" then
+            s = s .. p1
+            term.write(p1)
+        elseif event == "terminate" then
+            term.setCursorBlink(false)
+            error("Cancelled", 0)
+        end
+    end
+    term.setCursorBlink(false)
+    print()
+    return s
+end
+
 local function prompt(question, default)
-    write(question)
-    if default then write(" [" .. default .. "]") end
-    write(": ")
-    local answer = read()
+    term.write(question)
+    if default then term.write(" [" .. default .. "]") end
+    term.write(": ")
+    local answer = readLine()
     if answer == "" and default then return default end
     return answer
 end
@@ -44,15 +78,32 @@ local function yesno(question, default)
     return a == "y" or a == "yes"
 end
 
+-- Pick role via single keypress (M or F) — avoids any input quirks at the
+-- very first prompt where they're most painful to debug.
+local function pickRole()
+    term.write("Role: press [M]aster or [F]loor: ")
+    term.setCursorBlink(true)
+    while true do
+        local event, p1 = os.pullEvent()
+        if event == "char" then
+            local c = p1:lower()
+            if c == "m" then term.setCursorBlink(false); print("master"); return "master" end
+            if c == "f" then term.setCursorBlink(false); print("floor"); return "floor" end
+        elseif event == "key" then
+            if p1 == keys.m then term.setCursorBlink(false); print("master"); return "master" end
+            if p1 == keys.f then term.setCursorBlink(false); print("floor"); return "floor" end
+        elseif event == "terminate" then
+            term.setCursorBlink(false); error("Cancelled", 0)
+        end
+    end
+end
+
 term.clear()
 term.setCursorPos(1, 1)
 print("=== cc-elevator installer ===")
 print()
 
-local role = prompt("Role (master/floor)", "floor"):lower()
-if role ~= "master" and role ~= "floor" then
-    error("Role must be 'master' or 'floor'", 0)
-end
+local role = pickRole()
 
 local config = {
     role = role,
