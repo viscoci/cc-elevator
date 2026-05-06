@@ -180,16 +180,53 @@ local function handleStatus(senderId, tbl)
     end
 end
 
+local FIRE_DURATION = 0.5   -- seconds to assert output on all sides (short pulse)
+local SETTLE_DURATION = 1.5 -- seconds to wait for redstone feedback to dissipate
+
 local function handleCalibrateCall(senderId, tbl)
     if tbl.targetY ~= locY then return end
-    log("Calibration call - firing all sides")
+    log("Calibration call - firing all sides for " .. FIRE_DURATION .. "s")
     state.calibrating = true
+    -- Suppress edge detection while we're firing AND while redstone settles.
+    -- Without this, our own output looping back through wiring would register
+    -- as a rising edge on another face and trigger a phantom arrival.
+    state.suppressInputUntil = os.clock() + FIRE_DURATION + SETTLE_DURATION
+
     for _, side in ipairs(protocol.SIDES) do
         pcall(redstone.setOutput, side, true)
     end
-    sleep(1.5)
+    sleep(FIRE_DURATION)
     for _, side in ipairs(protocol.SIDES) do
         pcall(redstone.setOutput, side, false)
+    end
+    sleep(SETTLE_DURATION)
+
+    -- Sample inputs after settle. If any side is HIGH right now, the cart is
+    -- already here (e.g. parked at this floor when calibration started) — pick
+    -- that side as the anchor immediately.
+    local activeSide
+    for _, side in ipairs(protocol.SIDES) do
+        local ok, val = pcall(redstone.getInput, side)
+        if ok and val then activeSide = side; break end
+    end
+
+    -- Sync lastInputs to current reality so the next genuine rising edge is
+    -- detected cleanly.
+    for _, side in ipairs(protocol.SIDES) do
+        local ok, val = pcall(redstone.getInput, side)
+        if ok then state.lastInputs[side] = val end
+    end
+
+    state.suppressInputUntil = nil
+
+    if activeSide then
+        log("Cart already present on side: " .. activeSide)
+        state.calibrating = false
+        sendArrived(activeSide)
+    else
+        log("Call sent. Waiting for arrival rising-edge...")
+        -- state.calibrating stays true; redstoneMonitorTask will fire on the
+        -- next rising edge.
     end
 end
 
@@ -228,25 +265,32 @@ end
 
 local function redstoneMonitorTask()
     while true do
+        local suppressed = state.suppressInputUntil and os.clock() < state.suppressInputUntil
         for _, side in ipairs(protocol.SIDES) do
             local ok, val = pcall(redstone.getInput, side)
             if ok then
-                if val and not state.lastInputs[side] then
-                    -- Rising edge
-                    if state.calibrating then
-                        log("Calibration arrival via side: " .. side)
-                        state.calibrating = false
-                        sendArrived(side)
-                    elseif state.isAnchor and side == state.anchorSide then
-                        sendArrived(side)
+                if suppressed then
+                    -- Don't emit events. Don't update lastInputs either —
+                    -- handleCalibrateCall will reset them after the settle
+                    -- period, ensuring a clean baseline for edge detection.
+                else
+                    if val and not state.lastInputs[side] then
+                        -- Rising edge
+                        if state.calibrating then
+                            log("Calibration arrival via side: " .. side)
+                            state.calibrating = false
+                            sendArrived(side)
+                        elseif state.isAnchor and side == state.anchorSide then
+                            sendArrived(side)
+                        end
+                    elseif (not val) and state.lastInputs[side] then
+                        -- Falling edge
+                        if state.isAnchor and side == state.anchorSide then
+                            sendDeparted()
+                        end
                     end
-                elseif (not val) and state.lastInputs[side] then
-                    -- Falling edge
-                    if state.isAnchor and side == state.anchorSide then
-                        sendDeparted()
-                    end
+                    state.lastInputs[side] = val
                 end
-                state.lastInputs[side] = val
             end
         end
         sleep(0.05)
