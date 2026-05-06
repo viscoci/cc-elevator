@@ -16,6 +16,7 @@ M.TYPES = {
     ELEVATOR_CALL_REQUEST = "elevator_call_request",
     ELEVATOR_STATUS      = "elevator_status",
     FLOOR_RENAME         = "floor_rename",
+    REBOOT               = "reboot",
 }
 
 function M.send(targetId, payload)

@@ -34,9 +34,15 @@ local function writeJson(path, data)
 end
 
 local persisted = readJson(STATE_FILE) or {}
+local config = readJson("elevator_config.json") or {}
+
+-- elevator_config.json's elevatorName is authoritative if set (locked at
+-- install). Otherwise we fall back to whatever we previously learned from
+-- broadcasts and persisted to floor_state.json. If neither, auto-discover.
+local lockedName = config.elevatorName
 
 local state = {
-    elevatorName = persisted.elevatorName,  -- learned from broadcasts if not set
+    elevatorName = lockedName or persisted.elevatorName,  -- discovered from broadcasts if neither set
     syncComputerId = nil,
     floorNumber = nil,
     isAnchor = persisted.isAnchor or false,
@@ -136,10 +142,12 @@ local function handleHeartbeatAck(senderId, tbl)
 end
 
 local function handleStatus(senderId, tbl)
-    -- Learn elevator name + sync computer from broadcasts
-    if tbl.elevatorName and not state.elevatorName then
+    -- Auto-discover elevator name only if we don't have one yet AND it
+    -- wasn't locked at install. Once locked, foreign broadcasts are ignored.
+    if tbl.elevatorName and not state.elevatorName and not lockedName then
         state.elevatorName = tbl.elevatorName
         persist()
+        log("Auto-discovered elevator: " .. tbl.elevatorName)
     end
     if tbl.elevatorName and tbl.elevatorName ~= state.elevatorName then return end
     if tbl.syncComputerId then
@@ -185,6 +193,13 @@ local function handleCalibrateCall(senderId, tbl)
     end
 end
 
+local function handleReboot(senderId, tbl)
+    if tbl.elevatorName and state.elevatorName and tbl.elevatorName ~= state.elevatorName then return end
+    log("Reboot command received from master " .. senderId .. ". Rebooting in 1s...")
+    sleep(1)
+    os.reboot()
+end
+
 local function handleCallRequest(senderId, tbl)
     if tbl.elevatorName and tbl.elevatorName ~= state.elevatorName then return end
     -- Only the anchor for this floor pulses, on its known side.
@@ -205,6 +220,7 @@ local function messageListenerTask()
             elseif t == protocol.TYPES.ELEVATOR_STATUS       then handleStatus(senderId, tbl)
             elseif t == protocol.TYPES.CALIBRATE_CALL        then handleCalibrateCall(senderId, tbl)
             elseif t == protocol.TYPES.ELEVATOR_CALL_REQUEST then handleCallRequest(senderId, tbl)
+            elseif t == protocol.TYPES.REBOOT                then handleReboot(senderId, tbl)
             end
         end
     end
@@ -321,6 +337,12 @@ local function replTask()
 end
 
 -- ---------- Main ----------
+if state.elevatorName then
+    local source = lockedName and "locked" or "remembered"
+    log("Elevator: " .. state.elevatorName .. " (" .. source .. ")")
+else
+    log("Elevator: auto-discover (waiting for broadcast)")
+end
 log("Floor sync started. Anchor=" .. tostring(state.isAnchor) ..
     " side=" .. tostring(state.anchorSide))
 

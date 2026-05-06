@@ -24,10 +24,16 @@ On the master computer, run:
 wget run https://raw.githubusercontent.com/viscoci/cc-elevator/main/install.lua
 ```
 
-- Pick role: **master**
+- Pick role: **master** (press M)
 - Enter an elevator name (e.g. `storage-silo`) — this is just an identifier, used so multiple elevators in one world don't cross-talk.
 
 The computer reboots and shows the **setup GUI**. Leave it open — it will live-update as floor computers register.
+
+**Non-interactive shortcut**:
+
+```
+wget run https://raw.githubusercontent.com/viscoci/cc-elevator/main/install.lua -M storage-silo
+```
 
 ### 2. Each floor computer
 
@@ -37,11 +43,24 @@ Run the same command on every CC that's part of the elevator (anchors and pure-d
 wget run https://raw.githubusercontent.com/viscoci/cc-elevator/main/install.lua
 ```
 
-- Pick role: **floor**
+- Pick role: **floor** (press F)
 - `Run sync? (y/n)` — say yes if this computer reads/writes redstone (anchors, or any computer that should fire calls).
 - `Run display? (y/n)` — say yes if there's a monitor attached.
+- `Elevator name (blank = auto-discover)` — press Enter for auto-discover (single-elevator world); type the name to lock to a specific elevator.
 
 The computer reboots, GPS-locates itself, and registers with the master. You'll see the count tick up in the master's setup GUI.
+
+**Non-interactive shortcuts**:
+
+```
+wget run .../install.lua -F                  # auto-discover elevator
+wget run .../install.lua -F   storage-silo   # lock to "storage-silo"
+wget run .../install.lua -FS  storage-silo   # sync only, locked
+wget run .../install.lua -FD  storage-silo   # display only, locked
+wget run .../install.lua -FSD storage-silo   # sync + display, locked (explicit)
+```
+
+Letter order after `-F` doesn't matter — `-FDS` works too. Elevator name is optional; omit it for auto-discovery (which is what you want unless you have multiple elevators in radio range).
 
 ### 3. Calibrate
 
@@ -66,6 +85,10 @@ That's it — the system is now running.
 | `recalibrate <Y>` | Recalibrate just one level (e.g. after fixing wiring) |
 | `rename <N> <name...>` | Rename floor N (e.g. `rename 1 Lobby`) |
 | `describe <N> <text...>` | Set a description for floor N |
+| `reboot` | Reboot all floor stations (each pulls latest code from GitHub on the way back up) |
+| `reboot all` | Reboot all floors *and* the master |
+| `reboot self` | Reboot just the master |
+| `reboot <id>` | Reboot one specific computer by ID |
 | `setup` | Re-open the setup GUI |
 | `help` | Command list |
 

@@ -413,17 +413,59 @@ local function cmdSetup()
     setupGui.render(state)
 end
 
+local function cmdReboot(args)
+    local target = args[1]
+    if not target or target == "" then
+        -- Broadcast to all floors of this elevator
+        protocol.broadcast({
+            type = protocol.TYPES.REBOOT,
+            elevatorName = config.elevatorName,
+            ts = os.epoch("utc"),
+        })
+        print("Reboot broadcast sent to all floors of '" .. config.elevatorName .. "'.")
+    elseif target == "self" then
+        print("Rebooting master in 1s...")
+        sleep(1)
+        os.reboot()
+    elseif target == "all" then
+        protocol.broadcast({
+            type = protocol.TYPES.REBOOT,
+            elevatorName = config.elevatorName,
+            ts = os.epoch("utc"),
+        })
+        print("Reboot broadcast sent. Rebooting master in 3s...")
+        sleep(3)
+        os.reboot()
+    else
+        local id = tonumber(target)
+        if not id then
+            print("Usage: reboot [<computerId> | self | all]")
+            return
+        end
+        protocol.send(id, {
+            type = protocol.TYPES.REBOOT,
+            elevatorName = config.elevatorName,
+            ts = os.epoch("utc"),
+        })
+        print("Reboot sent to computer " .. id .. ".")
+    end
+end
+
 local function cmdHelp()
     print("Commands:")
-    print("  floors              - list registered floor stations")
-    print("  topology            - print calibrated floor list")
-    print("  calibrate           - run full sweep (uses currently registered floors)")
-    print("  recalibrate <Y>     - recalibrate a single level by Y coordinate")
-    print("  rename <N> <name>   - rename floor N")
-    print("  describe <N> <text> - set description for floor N")
-    print("  setup               - re-show the setup GUI")
-    print("  help                - this list")
-    print("  exit                - quit")
+    print("  floors                 - list registered floor stations")
+    print("  topology               - print calibrated floor list")
+    print("  calibrate              - run full sweep (uses currently registered floors)")
+    print("  recalibrate <Y>        - recalibrate a single level by Y coordinate")
+    print("  rename <N> <name>      - rename floor N")
+    print("  describe <N> <text>    - set description for floor N")
+    print("  reboot                 - reboot all floor stations (auto-pulls latest code)")
+    print("  reboot all             - reboot all floors AND master")
+    print("  reboot self            - reboot just the master")
+    print("  reboot <id>            - reboot one specific computer by ID")
+    print("  setup                  - re-show the setup GUI")
+    print("  help                   - this list")
+    print("  exit                   - quit")
 end
 
 local commands = {
@@ -434,6 +476,7 @@ local commands = {
     recalibrate = cmdRecalibrate,
     rename = cmdRename,
     describe = cmdDescribe,
+    reboot = cmdReboot,
     setup = cmdSetup,
     help = cmdHelp,
     ["?"] = cmdHelp,

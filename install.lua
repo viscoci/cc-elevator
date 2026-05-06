@@ -1,6 +1,23 @@
 -- One-shot installer: makes this computer part of the elevator system.
--- Usage on a fresh CC computer:
+--
+-- Interactive (no args):
 --   wget run https://raw.githubusercontent.com/<owner>/cc-elevator/main/install.lua
+--
+-- Non-interactive (skip prompts):
+--   wget run .../install.lua -M [elevatorName]                -- master
+--   wget run .../install.lua -F   [elevatorName]              -- floor, sync+display
+--   wget run .../install.lua -FS  [elevatorName]              -- floor, sync only
+--   wget run .../install.lua -FD  [elevatorName]              -- floor, display only
+--   wget run .../install.lua -FSD [elevatorName]              -- floor, sync+display
+--
+-- For floor installs, [elevatorName] is optional. If omitted, the floor will
+-- auto-discover the elevator from the first matching broadcast it hears
+-- (works fine for single-elevator worlds; specify a name if you have more
+-- than one elevator and want to lock this floor to a specific one).
+--
+-- Order of letters after -F doesn't matter: -FDS is equivalent to -FSD.
+
+local cliArgs = {...}
 
 -- ===== EDIT THESE TO POINT AT YOUR REPO BEFORE PUSHING =====
 local REPO_OWNER  = "viscoci"
@@ -27,6 +44,13 @@ local function fetch(path)
     local f = fs.open(path, "w")
     f.write(body)
     f.close()
+end
+
+-- Drain any pending events. Used between prompts so leftover key/char/key_up
+-- events from a previous keypress don't bleed into the next input.
+local function drainEvents()
+    os.queueEvent("__drain__")
+    while os.pullEvent() ~= "__drain__" do end
 end
 
 -- Custom line reader: pulls char/key events directly. Avoids relying on
@@ -78,24 +102,51 @@ local function yesno(question, default)
     return a == "y" or a == "yes"
 end
 
--- Pick role via single keypress (M or F) — avoids any input quirks at the
--- very first prompt where they're most painful to debug.
+-- Pick role via single keypress. Match only `char` events (not `key`); CC fires
+-- both per keypress, but `char` arrives after `key`, and matching only `char`
+-- ensures the trailing event for that keypress is consumed by us, not by the
+-- next prompt.
 local function pickRole()
     term.write("Role: press [M]aster or [F]loor: ")
     term.setCursorBlink(true)
-    while true do
+    drainEvents()
+    local result
+    while not result do
         local event, p1 = os.pullEvent()
         if event == "char" then
             local c = p1:lower()
-            if c == "m" then term.setCursorBlink(false); print("master"); return "master" end
-            if c == "f" then term.setCursorBlink(false); print("floor"); return "floor" end
-        elseif event == "key" then
-            if p1 == keys.m then term.setCursorBlink(false); print("master"); return "master" end
-            if p1 == keys.f then term.setCursorBlink(false); print("floor"); return "floor" end
+            if c == "m" then result = "master"
+            elseif c == "f" then result = "floor"
+            end
         elseif event == "terminate" then
             term.setCursorBlink(false); error("Cancelled", 0)
         end
     end
+    term.setCursorBlink(false)
+    print(result)
+    drainEvents()
+    return result
+end
+
+-- Parse CLI args. First arg may be a -M / -F[SD] flag.
+local function parseCliFlag(flag)
+    if not flag or flag:sub(1, 1) ~= "-" then return nil end
+    local body = flag:sub(2):upper()
+    if body == "M" then
+        return { role = "master" }
+    end
+    if body:sub(1, 1) == "F" then
+        local letters = body:sub(2)
+        local hasS, hasD = letters:find("S"), letters:find("D")
+        -- If no S/D letters given, default to both on (matches `-F` shorthand).
+        if letters == "" then hasS, hasD = true, true end
+        return {
+            role = "floor",
+            runSync = hasS ~= nil and hasS ~= false,
+            runDisplay = hasD ~= nil and hasD ~= false,
+        }
+    end
+    return nil
 end
 
 term.clear()
@@ -103,7 +154,14 @@ term.setCursorPos(1, 1)
 print("=== cc-elevator installer ===")
 print()
 
-local role = pickRole()
+local cliFlag = parseCliFlag(cliArgs[1])
+local role
+if cliFlag then
+    role = cliFlag.role
+    print("Role: " .. role .. " (from CLI)")
+else
+    role = pickRole()
+end
 
 local config = {
     role = role,
@@ -114,13 +172,34 @@ local config = {
 }
 
 if role == "master" then
-    config.elevatorName = prompt("Elevator name (e.g. storage-silo)")
-    if config.elevatorName == "" then error("Elevator name required", 0) end
+    if cliArgs[2] and cliArgs[2] ~= "" then
+        config.elevatorName = cliArgs[2]
+        print("Elevator name: " .. config.elevatorName .. " (from CLI)")
+    else
+        config.elevatorName = prompt("Elevator name (e.g. storage-silo)")
+        if config.elevatorName == "" then error("Elevator name required", 0) end
+    end
 else
-    config.runSync    = yesno("Run floor sync on this computer?", true)
-    config.runDisplay = yesno("Run floor display on this computer?", true)
+    if cliFlag then
+        config.runSync = cliFlag.runSync
+        config.runDisplay = cliFlag.runDisplay
+        print("Run sync: " .. tostring(config.runSync) .. " (from CLI)")
+        print("Run display: " .. tostring(config.runDisplay) .. " (from CLI)")
+    else
+        config.runSync    = yesno("Run floor sync on this computer?", true)
+        config.runDisplay = yesno("Run floor display on this computer?", true)
+    end
     if not config.runSync and not config.runDisplay then
         error("At least one of sync/display must be enabled", 0)
+    end
+
+    -- Optional elevator name lock. Empty/omitted = auto-discover.
+    if cliArgs[2] and cliArgs[2] ~= "" then
+        config.elevatorName = cliArgs[2]
+        print("Elevator name: " .. config.elevatorName .. " (from CLI)")
+    else
+        local name = prompt("Elevator name (blank = auto-discover)", "")
+        if name ~= "" then config.elevatorName = name end
     end
 end
 
