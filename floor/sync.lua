@@ -183,14 +183,32 @@ end
 local FIRE_DURATION = 0.5   -- seconds to assert output on all sides (short pulse)
 local SETTLE_DURATION = 1.5 -- seconds to wait for redstone feedback to dissipate
 
+local function snapshotInputs()
+    local snap, active = {}, {}
+    for _, side in ipairs(protocol.SIDES) do
+        local ok, val = pcall(redstone.getInput, side)
+        snap[side] = ok and val or false
+        if ok and val then table.insert(active, side) end
+    end
+    return snap, active
+end
+
+local function formatSnapshot(snap)
+    local parts = {}
+    for _, side in ipairs(protocol.SIDES) do
+        table.insert(parts, side .. "=" .. tostring(snap[side]))
+    end
+    return table.concat(parts, " ")
+end
+
 local function handleCalibrateCall(senderId, tbl)
     if tbl.targetY ~= locY then return end
-    log("Calibration call - firing all sides for " .. FIRE_DURATION .. "s")
     state.calibrating = true
     -- Suppress edge detection while we're firing AND while redstone settles.
-    -- Without this, our own output looping back through wiring would register
-    -- as a rising edge on another face and trigger a phantom arrival.
     state.suppressInputUntil = os.clock() + FIRE_DURATION + SETTLE_DURATION
+
+    local before, beforeActive = snapshotInputs()
+    log("CALIBRATE: pre-fire inputs: " .. formatSnapshot(before))
 
     for _, side in ipairs(protocol.SIDES) do
         pcall(redstone.setOutput, side, true)
@@ -201,32 +219,35 @@ local function handleCalibrateCall(senderId, tbl)
     end
     sleep(SETTLE_DURATION)
 
-    -- Sample inputs after settle. If any side is HIGH right now, the cart is
-    -- already here (e.g. parked at this floor when calibration started) — pick
-    -- that side as the anchor immediately.
-    local activeSide
-    for _, side in ipairs(protocol.SIDES) do
-        local ok, val = pcall(redstone.getInput, side)
-        if ok and val then activeSide = side; break end
-    end
+    local after, afterActive = snapshotInputs()
+    log("CALIBRATE: post-settle inputs: " .. formatSnapshot(after))
 
-    -- Sync lastInputs to current reality so the next genuine rising edge is
-    -- detected cleanly.
+    -- Sync lastInputs to post-settle values so subsequent rising edges are real.
     for _, side in ipairs(protocol.SIDES) do
-        local ok, val = pcall(redstone.getInput, side)
-        if ok then state.lastInputs[side] = val end
+        state.lastInputs[side] = after[side]
     end
-
     state.suppressInputUntil = nil
 
+    -- Prefer a side that ROSE between before and after (means our call action
+    -- caused the wire to go HIGH and stay — likely the elevator's response).
+    local risenSide
+    for _, side in ipairs(protocol.SIDES) do
+        if after[side] and not before[side] then
+            risenSide = side
+            break
+        end
+    end
+    -- Fall back to any active side post-settle (cart was already here).
+    local activeSide = risenSide or afterActive[1]
+
     if activeSide then
-        log("Cart already present on side: " .. activeSide)
+        log("CALIBRATE: claiming anchor on side " .. activeSide ..
+            (risenSide and " (rose during fire)" or " (already active)"))
         state.calibrating = false
         sendArrived(activeSide)
     else
-        log("Call sent. Waiting for arrival rising-edge...")
-        -- state.calibrating stays true; redstoneMonitorTask will fire on the
-        -- next rising edge.
+        log("CALIBRATE: call sent, no immediate input. Watching for rising edge...")
+        -- state.calibrating stays true; redstoneMonitorTask handles real arrival.
     end
 end
 
@@ -337,7 +358,8 @@ local function replTask()
                 print("  rename <name...>      - rename this floor")
                 print("  describe <text...>    - set this floor's description")
                 print("  status                - show current state")
-                print("  exit                  - quit")
+                print("  redstone              - show current redstone input on all sides")
+                print("  claim <side>          - claim this computer as the anchor for this floor")
             elseif cmd == "rename" then
                 local newName = table.concat(args, " ")
                 if newName == "" then print("Usage: rename <name>") else
@@ -365,6 +387,37 @@ local function replTask()
                         newDescription = desc,
                     })
                     print("Sent description update.")
+                end
+            elseif cmd == "redstone" then
+                print("Redstone inputs (computer ID " .. os.getComputerID() .. "):")
+                for _, side in ipairs(protocol.SIDES) do
+                    local ok, val = pcall(redstone.getInput, side)
+                    print("  " .. side .. ": " .. (ok and tostring(val) or "n/a"))
+                end
+            elseif cmd == "claim" then
+                local side = args[1]
+                if not side then print("Usage: claim <side>");
+                else
+                    local valid = false
+                    for _, s in ipairs(protocol.SIDES) do if s == side then valid = true end end
+                    if not valid then
+                        print("Side must be one of: " .. table.concat(protocol.SIDES, ", "))
+                    elseif not state.syncComputerId then
+                        print("Not connected to master yet.")
+                    elseif not state.floorNumber then
+                        print("Floor number not assigned yet (master must finish at least initial calibration).")
+                    else
+                        protocol.send(state.syncComputerId, {
+                            type = "set_anchor_request",
+                            elevatorName = state.elevatorName,
+                            floorNumber = state.floorNumber,
+                            locY = locY,
+                            computerId = os.getComputerID(),
+                            side = side,
+                        })
+                        print("Claim sent: I am the anchor for floor " .. state.floorNumber ..
+                              " on side " .. side)
+                    end
                 end
             elseif cmd == "status" then
                 print("  elevatorName: " .. tostring(state.elevatorName))

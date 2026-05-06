@@ -25,8 +25,13 @@ local function groupByY(registry)
     return ys, groups
 end
 
+local COMPETITOR_WINDOW = 2  -- seconds to keep listening after first arrival
+
 -- Run a single level: tell floors at targetY to fire all sides, wait for arrival.
 -- Returns { computerId, sideIn, locY } on success, or nil on timeout.
+-- After receiving the first arrival, keeps listening for COMPETITOR_WINDOW
+-- seconds and logs any other computers that also report arrival at the same Y
+-- (so the user can see if multiple computers think they're the anchor).
 local function calibrateLevel(targetY, computerIds)
     log("Calling cart to Y=" .. targetY)
     protocol.broadcast({
@@ -35,22 +40,45 @@ local function calibrateLevel(targetY, computerIds)
         ts = os.epoch("utc"),
     })
 
+    local first
+    local competitors = {}
     local deadline = os.clock() + LEVEL_TIMEOUT
     while os.clock() < deadline do
         local remaining = deadline - os.clock()
+        if remaining <= 0 then break end
         local senderId, tbl = protocol.receive(remaining)
         if tbl and tbl.type == protocol.TYPES.ELEVATOR_ARRIVED and tbl.locY == targetY then
-            log("Anchor found for Y=" .. targetY ..
-                ": computer " .. senderId .. " on side " .. (tbl.sideReceived or "?"))
-            return {
-                computerId = senderId,
-                sideIn = tbl.sideReceived,
-                locY = targetY,
-            }
+            local entry = { computerId = senderId, sideIn = tbl.sideReceived }
+            if not first then
+                first = entry
+                log("First arrival for Y=" .. targetY ..
+                    ": computer " .. senderId .. " side=" .. tostring(tbl.sideReceived))
+                -- Keep listening briefly for competitors.
+                deadline = os.clock() + COMPETITOR_WINDOW
+            else
+                table.insert(competitors, entry)
+                log("  also responded: computer " .. senderId ..
+                    " side=" .. tostring(tbl.sideReceived))
+            end
         end
     end
-    log("Timeout: no arrival at Y=" .. targetY)
-    return nil
+
+    if not first then
+        log("Timeout: no arrival at Y=" .. targetY)
+        return nil
+    end
+    if #competitors > 0 then
+        log("WARNING: " .. (#competitors + 1) .. " computers responded at Y=" .. targetY ..
+            ". Picking the first (" .. first.computerId .. "). Use `setanchor` on master " ..
+            "or `claim` on a floor to override.")
+    end
+    log("Anchor recorded for Y=" .. targetY ..
+        ": computer " .. first.computerId .. " on side " .. tostring(first.sideIn))
+    return {
+        computerId = first.computerId,
+        sideIn = first.sideIn,
+        locY = targetY,
+    }
 end
 
 -- Run the full sweep. registry is master's floors-by-locY table.

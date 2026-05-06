@@ -85,6 +85,7 @@ That's it — the system is now running.
 | `recalibrate <Y>` | Recalibrate just one level (e.g. after fixing wiring) |
 | `rename <N> <name...>` | Rename floor N (e.g. `rename 1 Lobby`) |
 | `describe <N> <text...>` | Set a description for floor N |
+| `setanchor <N> <id> <side>` | Manually set the anchor for floor N (use when calibration picked the wrong computer) |
 | `reboot` | Reboot all floor stations (each pulls latest code from GitHub on the way back up) |
 | `reboot all` | Reboot all floors *and* the master |
 | `reboot self` | Reboot just the master |
@@ -99,6 +100,8 @@ That's it — the system is now running.
 | `rename <name...>` | Ask the master to rename this floor |
 | `describe <text...>` | Ask the master to set this floor's description |
 | `status` | Show this computer's local state (anchor flag, side, master ID, etc.) |
+| `redstone` | Print the current redstone input on every side (handy when debugging which computer is wired to the arrival sensor) |
+| `claim <side>` | Claim *this* computer as the anchor for *this* floor with the given side. Master accepts and re-broadcasts topology. |
 
 Floor renames propagate instantly — every display in the elevator updates within ~2s.
 
@@ -149,7 +152,17 @@ Delete `elevator_topology.json` on the master to force a fresh setup GUI + recal
 That level's arrival redstone isn't reaching a computer (or the wired computer hadn't booted yet). Check wiring, then run `recalibrate <Y>` on the master.
 
 **Two anchors detected on the same level**
-The master keeps the first one to report. Once the next status broadcast goes out, the other computer sees it isn't the anchor and goes passive. No action needed.
+The master keeps the first one to report and logs the runners-up as `also responded: computer N side=X`. If the wrong one was picked:
+- From the master: `setanchor <floorNumber> <correctComputerId> <correctSide>`
+- Or from the correct floor computer's terminal: `claim <side>`
+
+Either propagates via topology broadcast within ~2s.
+
+**Calibration says "WARNING: N computers responded"**
+Multiple computers at the same Y are detecting redstone input when the cart arrives. This usually means their faces are on the same redstone bus. Use `claim` / `setanchor` to lock the right one.
+
+**Trying to figure out which floor computer is actually wired to the arrival sensor**
+Stand by the elevator, send the cart to that floor manually, and on each candidate floor computer's terminal type `redstone`. The one whose `back: true` (or whichever side) lights up when the cart arrives is the anchor.
 
 **Display shows `---`**
 The display hasn't received an `elevator_status` broadcast yet — usually because the master isn't running or the modem can't reach. Resolves within 2s once the master comes online.

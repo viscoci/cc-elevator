@@ -247,6 +247,27 @@ local function handleElevatorCall(senderId, tbl)
     broadcastStatus()
 end
 
+local function handleSetAnchorRequest(senderId, tbl)
+    if tbl.elevatorName ~= config.elevatorName then return end
+    if not state.topology then
+        log("Anchor claim from " .. senderId .. " ignored - no topology yet")
+        return
+    end
+    local lvl = state.topology[tbl.locY]
+    if not lvl then
+        log("Anchor claim from " .. senderId .. " for unknown Y=" .. tostring(tbl.locY))
+        return
+    end
+    log("Anchor claim: floor " .. lvl.floorNumber .. " (Y=" .. lvl.locY ..
+        ") -> comp=" .. tbl.computerId .. " side=" .. tbl.side ..
+        " (was comp=" .. tostring(lvl.anchorComputerId) ..
+        " side=" .. tostring(lvl.anchorSide) .. ")")
+    lvl.anchorComputerId = tbl.computerId
+    lvl.anchorSide = tbl.side
+    persistTopology()
+    broadcastStatus()
+end
+
 local function handleFloorRename(senderId, tbl)
     if tbl.elevatorName ~= config.elevatorName then return end
     if not state.topology then
@@ -281,6 +302,7 @@ local function messageListenerTask()
             elseif t == protocol.TYPES.ELEVATOR_DEPARTED  then handleElevatorDeparted(senderId, tbl)
             elseif t == protocol.TYPES.ELEVATOR_CALL      then handleElevatorCall(senderId, tbl)
             elseif t == protocol.TYPES.FLOOR_RENAME       then handleFloorRename(senderId, tbl)
+            elseif t == "set_anchor_request"              then handleSetAnchorRequest(senderId, tbl)
             end
             -- Don't re-render setup GUI here; that would clobber any in-progress
             -- user input on the prompt line. The REPL refreshes the GUI between
@@ -413,6 +435,33 @@ local function cmdSetup()
     setupGui.render(state)
 end
 
+local function cmdSetAnchor(args)
+    local floorNum = tonumber(args[1])
+    local computerId = tonumber(args[2])
+    local side = args[3]
+    if not floorNum or not computerId or not side then
+        print("Usage: setanchor <floorNumber> <computerId> <side>")
+        print("       e.g. setanchor 2 31 back")
+        return
+    end
+    local valid = false
+    for _, s in ipairs(protocol.SIDES) do if s == side then valid = true end end
+    if not valid then
+        print("Side must be one of: " .. table.concat(protocol.SIDES, ", "))
+        return
+    end
+    local lvl = getLevelByNumber(floorNum)
+    if not lvl then print("Unknown floor " .. floorNum); return end
+    local oldId, oldSide = lvl.anchorComputerId, lvl.anchorSide
+    lvl.anchorComputerId = computerId
+    lvl.anchorSide = side
+    persistTopology()
+    broadcastStatus()
+    print(string.format("Floor %d anchor: comp=%s side=%s -> comp=%d side=%s",
+        floorNum, tostring(oldId), tostring(oldSide), computerId, side))
+    print("(Topology broadcast — affected floor stations will pick up the change.)")
+end
+
 local function cmdReboot(args)
     local target = args[1]
     if not target or target == "" then
@@ -459,6 +508,7 @@ local function cmdHelp()
     print("  recalibrate <Y>        - recalibrate a single level by Y coordinate")
     print("  rename <N> <name>      - rename floor N")
     print("  describe <N> <text>    - set description for floor N")
+    print("  setanchor <N> <id> <side> - manually set the anchor for floor N")
     print("  reboot                 - reboot all floor stations (auto-pulls latest code)")
     print("  reboot all             - reboot all floors AND master")
     print("  reboot self            - reboot just the master")
@@ -476,6 +526,7 @@ local commands = {
     recalibrate = cmdRecalibrate,
     rename = cmdRename,
     describe = cmdDescribe,
+    setanchor = cmdSetAnchor,
     reboot = cmdReboot,
     setup = cmdSetup,
     help = cmdHelp,
