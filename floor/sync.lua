@@ -156,25 +156,35 @@ local function handleStatus(senderId, tbl)
             log("Discovered master: " .. tbl.syncComputerId)
         end
     end
-    -- If broadcast tells us we're an anchor (post-calibration), persist.
-    if tbl.floors then
+    -- Find OUR floor entry: anchor-ID match wins, else nearest-Y bucket. The
+    -- nearest-Y fallback handles bucketed levels where this computer's locY
+    -- may differ from the canonical floorY by a few blocks.
+    if tbl.floors and #tbl.floors > 0 then
+        local myEntry
         for _, f in ipairs(tbl.floors) do
-            if f.floorY == locY then
-                state.floorNumber = f.floorNumber
-                if f.anchorComputerId == os.getComputerID() then
-                    if not state.isAnchor or state.anchorSide ~= f.anchorSide then
-                        state.isAnchor = true
-                        state.anchorSide = f.anchorSide
-                        persist()
-                        log("I am the anchor for Floor " .. f.floorNumber .. " (side=" .. tostring(f.anchorSide) .. ")")
-                    end
-                elseif state.isAnchor then
-                    -- Topology says we're not the anchor anymore.
-                    state.isAnchor = false
-                    state.anchorSide = nil
+            if f.anchorComputerId == os.getComputerID() then myEntry = f; break end
+        end
+        if not myEntry then
+            local nearestDist = math.huge
+            for _, f in ipairs(tbl.floors) do
+                local d = math.abs(f.floorY - locY)
+                if d < nearestDist then nearestDist = d; myEntry = f end
+            end
+        end
+        if myEntry then
+            state.floorNumber = myEntry.floorNumber
+            if myEntry.anchorComputerId == os.getComputerID() then
+                if not state.isAnchor or state.anchorSide ~= myEntry.anchorSide then
+                    state.isAnchor = true
+                    state.anchorSide = myEntry.anchorSide
                     persist()
+                    log("I am the anchor for Floor " .. myEntry.floorNumber ..
+                        " (side=" .. tostring(myEntry.anchorSide) .. ")")
                 end
-                break
+            elseif state.isAnchor then
+                state.isAnchor = false
+                state.anchorSide = nil
+                persist()
             end
         end
     end
@@ -202,7 +212,14 @@ local function formatSnapshot(snap)
 end
 
 local function handleCalibrateCall(senderId, tbl)
-    if tbl.targetY ~= locY then return end
+    -- Match by canonical targetY OR by being a member of the level's locY list.
+    local match = (tbl.targetY == locY)
+    if not match and tbl.targetYs then
+        for _, y in ipairs(tbl.targetYs) do
+            if y == locY then match = true; break end
+        end
+    end
+    if not match then return end
     state.calibrating = true
     -- Suppress edge detection while we're firing AND while redstone settles.
     state.suppressInputUntil = os.clock() + FIRE_DURATION + SETTLE_DURATION

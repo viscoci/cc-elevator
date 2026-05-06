@@ -86,6 +86,9 @@ That's it — the system is now running.
 | `rename <N> <name...>` | Rename floor N (e.g. `rename 1 Lobby`) |
 | `describe <N> <text...>` | Set a description for floor N |
 | `setanchor <N> <id> <side>` | Manually set the anchor for floor N (use when calibration picked the wrong computer) |
+| `floorspacing <N>` | Bucket Y values within `N-1` blocks of each other onto the same level (default 1 = strict). Use this if your display computers sit a few blocks above/below the floor's anchor. |
+| `forget <Y>` | Ignore all floor computers at this exact locY (one-off stray) |
+| `unforget <Y>` | Stop ignoring a Y |
 | `reboot` | Reboot all floor stations (each pulls latest code from GitHub on the way back up) |
 | `reboot all` | Reboot all floors *and* the master |
 | `reboot self` | Reboot just the master |
@@ -163,6 +166,12 @@ Multiple computers at the same Y are detecting redstone input when the cart arri
 
 **Trying to figure out which floor computer is actually wired to the arrival sensor**
 Stand by the elevator, send the cart to that floor manually, and on each candidate floor computer's terminal type `redstone`. The one whose `back: true` (or whichever side) lights up when the cart arrives is the anchor.
+
+**Calibration tries to go to a floor that doesn't exist**
+A floor computer is registered at a slightly different Y than its companions on the same physical level (e.g., placed one block higher). Run `floors` on the master — Y values with only one computer are usually the culprits. Three fixes from least to most invasive:
+- `floorspacing <N>` on the master where N is bigger than your typical "off by" gap (e.g., `floorspacing 4` if displays might be up to 3 blocks above the anchor). Computers within `N-1` blocks of each other become the same level. Run `calibrate` again afterward.
+- Move the misplaced computer in-world so its Y matches the rest of that level, then `reboot` it.
+- `forget <Y>` on the master to ignore that exact Y permanently.
 
 **Display shows `---`**
 The display hasn't received an `elevator_status` broadcast yet — usually because the master isn't running or the modem can't reach. Resolves within 2s once the master comes online.

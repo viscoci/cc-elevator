@@ -38,6 +38,19 @@ local config = readJson(CONFIG_FILE)
 assert(config and config.role == "master", "Run install.lua first (role must be master).")
 assert(config.elevatorName, "elevatorName missing from config.")
 
+-- Floor spacing: minimum vertical distance between distinct levels. Computers
+-- whose Y values are within (levelSpacing - 1) blocks of each other are
+-- bucketed onto the same level — this is what lets a display computer two
+-- blocks above the floor's anchor still count as part of that floor.
+-- Default 1 = strict (every Y is its own level, original behavior).
+if config.levelSpacing == nil then config.levelSpacing = 1 end
+
+local function saveConfig()
+    local f = fs.open(CONFIG_FILE, "w")
+    f.write(textutils.serializeJSON(config))
+    f.close()
+end
+
 rednetSetup.open()
 
 -- ---------- State ----------
@@ -46,6 +59,8 @@ local state = {
     registry = {},
     -- topology[locY] = { floorNumber, locY, name, description, anchorComputerId, anchorSide }
     topology = nil,        -- nil until calibrated
+    -- ignoredY[locY] = true means: don't accept registrations at this Y, skip it during calibration
+    ignoredY = {},
     currentFloor = nil,    -- last confirmed floor (table copy of topology entry)
     destination = nil,     -- pending target (table copy)
     elevatorState = "unknown",
@@ -64,6 +79,38 @@ if loadedTopo and loadedTopo.elevatorName == config.elevatorName and loadedTopo.
     log("Loaded topology with " .. #loadedTopo.levels .. " level(s).")
 else
     log("No topology cache - entering setup mode.")
+end
+if loadedTopo and loadedTopo.ignoredY then
+    for _, y in ipairs(loadedTopo.ignoredY) do
+        state.ignoredY[y] = true
+    end
+    log("Loaded " .. #loadedTopo.ignoredY .. " ignored Y level(s).")
+end
+
+-- ---------- Bucketing ----------
+-- Cluster registry entries' locY values into canonical "level" Ys based on
+-- config.levelSpacing. Sets entry.canonicalY on every registry entry.
+local function rebucket()
+    local spacing = config.levelSpacing or 1
+    local entries = {}
+    for _, e in pairs(state.registry) do table.insert(entries, e) end
+    table.sort(entries, function(a, b) return a.locY < b.locY end)
+
+    local currentCanonical, lastY
+    for _, e in ipairs(entries) do
+        if not currentCanonical or e.locY - lastY >= spacing then
+            currentCanonical = e.locY
+        end
+        e.canonicalY = currentCanonical
+        lastY = e.locY
+    end
+end
+
+-- Lookup canonical Y for a given (senderId, fallbackLocY) pair.
+local function canonicalYForSender(senderId, fallbackLocY)
+    local e = state.registry[senderId]
+    if e and e.canonicalY then return e.canonicalY end
+    return fallbackLocY
 end
 
 -- ---------- Helpers ----------
@@ -84,12 +131,18 @@ local function topologyAsList()
 end
 
 local function persistTopology()
-    if not state.topology then return end
-    local list = topologyAsList()
+    -- Persist topology AND ignoredY together so settings survive reboots.
+    -- We persist even when topology is empty so that ignoredY changes stick
+    -- even before calibration runs.
+    local list = state.topology and topologyAsList() or {}
+    local ignoredList = {}
+    for y, _ in pairs(state.ignoredY or {}) do table.insert(ignoredList, y) end
+    table.sort(ignoredList)
     writeJson(TOPOLOGY_FILE, {
         elevatorName = config.elevatorName,
         calibratedAt = os.epoch("utc"),
         levels = list,
+        ignoredY = ignoredList,
     })
 end
 
@@ -136,6 +189,11 @@ end
 -- ---------- Message handlers ----------
 local function handleFloorRegister(senderId, tbl)
     if tbl.elevatorName ~= config.elevatorName then return end
+    if state.ignoredY[tbl.locY] then
+        -- This Y has been forgotten — don't pollute the registry. Floor will
+        -- keep retrying but we'll keep dropping it.
+        return
+    end
     local existing = state.registry[senderId]
     local isNew = not existing
     state.registry[senderId] = {
@@ -145,13 +203,16 @@ local function handleFloorRegister(senderId, tbl)
         locZ = tbl.locZ,
         lastSeen = os.epoch("utc"),
     }
-    -- If we have topology, find the floor number for this Y so we can ack.
-    local lvl = state.topology and state.topology[tbl.locY]
+    rebucket()
+    local canonical = state.registry[senderId].canonicalY
+    -- If we have topology, find the floor number for this canonical Y so we can ack.
+    local lvl = state.topology and state.topology[canonical]
     protocol.send(senderId, {
         type = protocol.TYPES.FLOOR_REGISTERED,
         elevatorName = config.elevatorName,
         floorNumber = lvl and lvl.floorNumber or nil,
         locY = tbl.locY,
+        canonicalY = canonical,
     })
     if isNew then
         log("Registered floor station " .. senderId .. " at Y=" .. tbl.locY)
@@ -169,11 +230,13 @@ local function handleHeartbeat(senderId, tbl)
         handleFloorRegister(senderId, tbl)
         return
     end
-    local lvl = state.topology and state.topology[entry.locY]
+    local canonical = entry.canonicalY or entry.locY
+    local lvl = state.topology and state.topology[canonical]
     protocol.send(senderId, {
         type = protocol.TYPES.HEARTBEAT_ACK,
         floorNumber = lvl and lvl.floorNumber or nil,
         locY = entry.locY,
+        canonicalY = canonical,
     })
 end
 
@@ -181,9 +244,10 @@ local function handleElevatorArrived(senderId, tbl)
     if tbl.elevatorName ~= config.elevatorName then return end
     if state.setupMode then return end  -- calibration handles its own arrivals
 
-    local lvl = state.topology and state.topology[tbl.locY]
+    local canonicalY = canonicalYForSender(senderId, tbl.locY)
+    local lvl = state.topology and state.topology[canonicalY]
     if not lvl then
-        log("Arrival at unknown Y=" .. tostring(tbl.locY) .. " - ignoring")
+        log("Arrival at unknown Y=" .. tostring(canonicalY) .. " - ignoring")
         return
     end
     state.currentFloor = lvl
@@ -199,7 +263,8 @@ local function handleElevatorDeparted(senderId, tbl)
     if tbl.elevatorName ~= config.elevatorName then return end
     if state.setupMode then return end
 
-    local lvl = state.topology and state.topology[tbl.locY]
+    local canonicalY = canonicalYForSender(senderId, tbl.locY)
+    local lvl = state.topology and state.topology[canonicalY]
     if not lvl then return end
     if state.currentFloor and state.currentFloor.locY == lvl.locY then
         state.currentFloor = nil
@@ -253,9 +318,10 @@ local function handleSetAnchorRequest(senderId, tbl)
         log("Anchor claim from " .. senderId .. " ignored - no topology yet")
         return
     end
-    local lvl = state.topology[tbl.locY]
+    local canonicalY = canonicalYForSender(senderId, tbl.locY)
+    local lvl = state.topology[canonicalY]
     if not lvl then
-        log("Anchor claim from " .. senderId .. " for unknown Y=" .. tostring(tbl.locY))
+        log("Anchor claim from " .. senderId .. " for unknown level Y=" .. tostring(canonicalY))
         return
     end
     log("Anchor claim: floor " .. lvl.floorNumber .. " (Y=" .. lvl.locY ..
@@ -274,9 +340,10 @@ local function handleFloorRename(senderId, tbl)
         log("Rename ignored - no topology yet")
         return
     end
-    local lvl = state.topology[tbl.locY]
+    local canonicalY = canonicalYForSender(senderId, tbl.locY)
+    local lvl = state.topology[canonicalY]
     if not lvl then
-        log("Rename for unknown Y=" .. tostring(tbl.locY))
+        log("Rename for unknown level Y=" .. tostring(canonicalY))
         return
     end
     if tbl.newName and tbl.newName ~= "" then
@@ -337,12 +404,29 @@ local function cmdFloors()
         print("(no floor stations registered)")
         return
     end
-    local list = {}
-    for _, e in pairs(state.registry) do table.insert(list, e) end
-    table.sort(list, function(a, b) return a.locY < b.locY end)
-    for _, e in ipairs(list) do
-        print(string.format("  comp=%d  Y=%d  X=%s  Z=%s",
-            e.computerId, e.locY, tostring(e.locX), tostring(e.locZ)))
+    rebucket()
+    -- Group by canonical Y (level bucket).
+    local byLevel = {}
+    for _, e in pairs(state.registry) do
+        local cy = e.canonicalY or e.locY
+        if not byLevel[cy] then byLevel[cy] = {} end
+        table.insert(byLevel[cy], e)
+    end
+    local cys = {}
+    for cy, _ in pairs(byLevel) do table.insert(cys, cy) end
+    table.sort(cys)
+    print(string.format("%d level(s) (spacing=%d):", #cys, config.levelSpacing or 1))
+    for _, cy in ipairs(cys) do
+        local entries = byLevel[cy]
+        local marker = ""
+        if state.ignoredY and state.ignoredY[cy] then marker = "  [IGNORED]" end
+        print(string.format("  Level Y=%d  (%d computer%s)%s",
+            cy, #entries, #entries == 1 and "" or "s", marker))
+        for _, e in ipairs(entries) do
+            local note = (e.locY ~= cy) and ("  (locY=" .. e.locY .. ")") or ""
+            print(string.format("    comp=%d  X=%s  Z=%s%s",
+                e.computerId, tostring(e.locX), tostring(e.locZ), note))
+        end
     end
 end
 
@@ -364,10 +448,22 @@ local function cmdCalibrate()
         return
     end
     print("Starting calibration sweep...")
-    -- Build registry-by-floor input for calibrate module
+    -- Build registry input for calibrate module, skipping ignored Y values.
     local registry = {}
+    local skipped = 0
     for id, e in pairs(state.registry) do
-        registry[id] = e
+        if state.ignoredY[e.locY] then
+            skipped = skipped + 1
+        else
+            registry[id] = e
+        end
+    end
+    if skipped > 0 then
+        print("(skipping " .. skipped .. " floor computer(s) at ignored Y values)")
+    end
+    if next(registry) == nil then
+        print("All registered floors are at ignored Y values. Use `unforget <Y>` first.")
+        return
     end
     local levels = calibrate.run(registry)
     if not levels then
@@ -433,6 +529,62 @@ end
 local function cmdSetup()
     state.setupMode = true
     setupGui.render(state)
+end
+
+local function cmdFloorSpacing(args)
+    if not args[1] then
+        print("Current levelSpacing: " .. (config.levelSpacing or 1))
+        print("Usage: floorspacing <N>")
+        print("  N=1  : strict (every Y is its own level)")
+        print("  N=3  : Y values within 2 blocks of each other are bucketed together")
+        print("  N=5  : Y values within 4 blocks of each other are bucketed together")
+        return
+    end
+    local n = tonumber(args[1])
+    if not n or n < 1 then print("N must be >= 1"); return end
+    config.levelSpacing = n
+    saveConfig()
+    rebucket()
+    print("levelSpacing = " .. n .. ". Run `floors` to see updated grouping.")
+    print("Run `calibrate` to rebuild topology with the new spacing.")
+end
+
+local function cmdForget(args)
+    local y = tonumber(args[1])
+    if not y then print("Usage: forget <Y>  (drop all floor computers at this exact locY)"); return end
+    state.ignoredY[y] = true
+    -- Drop registered computers at this exact locY (not canonical — exact)
+    local removed = 0
+    for id, e in pairs(state.registry) do
+        if e.locY == y then state.registry[id] = nil; removed = removed + 1 end
+    end
+    rebucket()
+    -- After rebucket, any topology entry whose canonical Y no longer has any
+    -- registered members should be dropped.
+    if state.topology then
+        local stillRepresented = {}
+        for _, e in pairs(state.registry) do stillRepresented[e.canonicalY] = true end
+        for cy, _ in pairs(state.topology) do
+            if not stillRepresented[cy] then state.topology[cy] = nil end
+        end
+        local list = topologyAsList()
+        for i, lvl in ipairs(list) do lvl.floorNumber = i end
+    end
+    persistTopology()
+    broadcastStatus()
+    print(string.format("locY=%d ignored. Dropped %d registration(s).", y, removed))
+end
+
+local function cmdUnforget(args)
+    local y = tonumber(args[1])
+    if not y then print("Usage: unforget <Y>"); return end
+    if not state.ignoredY[y] then
+        print("Y=" .. y .. " was not ignored.")
+        return
+    end
+    state.ignoredY[y] = nil
+    persistTopology()
+    print("Y=" .. y .. " no longer ignored. Floors there can re-register on their next heartbeat.")
 end
 
 local function cmdSetAnchor(args)
@@ -509,6 +661,9 @@ local function cmdHelp()
     print("  rename <N> <name>      - rename floor N")
     print("  describe <N> <text>    - set description for floor N")
     print("  setanchor <N> <id> <side> - manually set the anchor for floor N")
+    print("  floorspacing <N>       - bucket Y values within N-1 blocks as one level")
+    print("  forget <Y>             - ignore all floor computers at this Y")
+    print("  unforget <Y>           - stop ignoring a Y (allow re-registration)")
     print("  reboot                 - reboot all floor stations (auto-pulls latest code)")
     print("  reboot all             - reboot all floors AND master")
     print("  reboot self            - reboot just the master")
@@ -527,6 +682,9 @@ local commands = {
     rename = cmdRename,
     describe = cmdDescribe,
     setanchor = cmdSetAnchor,
+    floorspacing = cmdFloorSpacing,
+    forget = cmdForget,
+    unforget = cmdUnforget,
     reboot = cmdReboot,
     setup = cmdSetup,
     help = cmdHelp,
