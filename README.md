@@ -88,6 +88,7 @@ That's it — the system is now running.
 | `call <N>` | Call the cart to floor N (same as a touch on a display monitor) |
 | `setanchor <N> <id> <side>` | Manually set the anchor for floor N (use when calibration picked the wrong computer) |
 | `floorspacing <N>` | Bucket Y values within `N-1` blocks of each other onto the same level (default 1 = strict). Use this if your display computers sit a few blocks above/below the floor's anchor. |
+| `firstfloor <N>` | Set the lowest floor's number (default 1). Use `0` for ground-floor-zero, or any integer (negative for basements). Default `Floor X` names auto-update; custom names are kept. |
 | `forget <Y>` | Ignore all floor computers at this exact locY (one-off stray) |
 | `unforget <Y>` | Stop ignoring a Y |
 | `reboot` | Reboot all floor stations (each pulls latest code from GitHub on the way back up) |

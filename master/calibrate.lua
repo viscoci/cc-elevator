@@ -105,8 +105,11 @@ end
 
 -- Run the full sweep. Registry entries should already have canonicalY set
 -- (master calls rebucket() before invoking this).
+-- firstFloorNumber defaults to 1; pass 0 (or any integer) to shift the
+-- numbering (e.g., ground-floor-zero or basement levels).
 -- Returns list of level entries: { floorNumber, locY, name, anchorComputerId, anchorSide }.
-function M.run(registry)
+function M.run(registry, firstFloorNumber)
+    firstFloorNumber = firstFloorNumber or 1
     local ys, groups = groupByY(registry)
     if #ys == 0 then
         log("No floors registered, cannot calibrate.")
@@ -118,10 +121,11 @@ function M.run(registry)
 
     for i, y in ipairs(ys) do
         local result = calibrateLevel(y, groups[y], registry)
+        local floorNum = firstFloorNumber + i - 1
         local level = {
-            floorNumber = i,
+            floorNumber = floorNum,
             locY = y,
-            name = "Floor " .. i,
+            name = "Floor " .. floorNum,
             anchorComputerId = result and result.computerId or nil,
             anchorSide = result and result.sideIn or nil,
         }

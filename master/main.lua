@@ -44,6 +44,9 @@ assert(config.elevatorName, "elevatorName missing from config.")
 -- blocks above the floor's anchor still count as part of that floor.
 -- Default 1 = strict (every Y is its own level, original behavior).
 if config.levelSpacing == nil then config.levelSpacing = 1 end
+-- First floor number — defaults to 1 (lowest level = "Floor 1"). Set to 0 for
+-- ground-floor-zero numbering, or any integer (including negative) for basements.
+if config.firstFloor == nil then config.firstFloor = 1 end
 
 local function saveConfig()
     local f = fs.open(CONFIG_FILE, "w")
@@ -128,6 +131,22 @@ local function topologyAsList()
     for _, lvl in pairs(state.topology) do table.insert(list, lvl) end
     table.sort(list, function(a, b) return a.locY < b.locY end)
     return list
+end
+
+-- Reassign floorNumber values to all topology entries based on Y order and the
+-- configured firstFloor offset. Call after any change to the level set.
+-- If a level's name still matches the default "Floor <oldNumber>" pattern, the
+-- name is updated to match the new number; custom names are preserved.
+local function renumberTopology()
+    if not state.topology then return end
+    local list = topologyAsList()
+    for i, lvl in ipairs(list) do
+        local newNum = (config.firstFloor or 1) + i - 1
+        if lvl.name == ("Floor " .. tostring(lvl.floorNumber)) then
+            lvl.name = "Floor " .. newNum
+        end
+        lvl.floorNumber = newNum
+    end
 end
 
 local function persistTopology()
@@ -465,7 +484,7 @@ local function cmdCalibrate()
         print("All registered floors are at ignored Y values. Use `unforget <Y>` first.")
         return
     end
-    local levels = calibrate.run(registry)
+    local levels = calibrate.run(registry, config.firstFloor)
     if not levels then
         print("Calibration failed.")
         return
@@ -491,9 +510,7 @@ local function cmdRecalibrate(args)
     existing.anchorComputerId = result.computerId
     existing.anchorSide = result.sideIn
     state.topology[y] = existing
-    -- Recompute floor numbers in case Y was new.
-    local list = topologyAsList()
-    for i, lvl in ipairs(list) do lvl.floorNumber = i end
+    renumberTopology()
     persistTopology()
     print("Y=" .. y .. " anchor recorded: comp=" .. result.computerId .. " side=" .. result.sideIn)
     broadcastStatus()
@@ -529,6 +546,22 @@ end
 local function cmdSetup()
     state.setupMode = true
     setupGui.render(state)
+end
+
+local function cmdFirstFloor(args)
+    if not args[1] then
+        print("Current firstFloor: " .. (config.firstFloor or 1))
+        print("Usage: firstfloor <N>  (e.g. 0 for ground-floor-zero, or any integer)")
+        return
+    end
+    local n = tonumber(args[1])
+    if not n or n ~= math.floor(n) then print("N must be an integer"); return end
+    config.firstFloor = n
+    saveConfig()
+    renumberTopology()
+    persistTopology()
+    broadcastStatus()
+    print("firstFloor = " .. n .. ". Topology renumbered. Lowest floor is now " .. n .. ".")
 end
 
 local function cmdFloorSpacing(args)
@@ -567,8 +600,7 @@ local function cmdForget(args)
         for cy, _ in pairs(state.topology) do
             if not stillRepresented[cy] then state.topology[cy] = nil end
         end
-        local list = topologyAsList()
-        for i, lvl in ipairs(list) do lvl.floorNumber = i end
+        renumberTopology()
     end
     persistTopology()
     broadcastStatus()
@@ -676,6 +708,7 @@ local function cmdHelp()
     print("  call <N>               - call the cart to floor N")
     print("  setanchor <N> <id> <side> - manually set the anchor for floor N")
     print("  floorspacing <N>       - bucket Y values within N-1 blocks as one level")
+    print("  firstfloor <N>         - set the lowest floor's number (e.g. 0 for ground-floor-zero)")
     print("  forget <Y>             - ignore all floor computers at this Y")
     print("  unforget <Y>           - stop ignoring a Y (allow re-registration)")
     print("  reboot                 - reboot all floor stations (auto-pulls latest code)")
@@ -698,6 +731,7 @@ local commands = {
     call = cmdCall,
     setanchor = cmdSetAnchor,
     floorspacing = cmdFloorSpacing,
+    firstfloor = cmdFirstFloor,
     forget = cmdForget,
     unforget = cmdUnforget,
     reboot = cmdReboot,
