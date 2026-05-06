@@ -85,6 +85,7 @@ That's it — the system is now running.
 | `recalibrate <Y>` | Recalibrate just one level (e.g. after fixing wiring) |
 | `rename <N> <name...>` | Rename floor N (e.g. `rename 1 Lobby`) |
 | `describe <N> <text...>` | Set a description for floor N |
+| `call <N>` | Call the cart to floor N (same as a touch on a display monitor) |
 | `setanchor <N> <id> <side>` | Manually set the anchor for floor N (use when calibration picked the wrong computer) |
 | `floorspacing <N>` | Bucket Y values within `N-1` blocks of each other onto the same level (default 1 = strict). Use this if your display computers sit a few blocks above/below the floor's anchor. |
 | `forget <Y>` | Ignore all floor computers at this exact locY (one-off stray) |
@@ -105,6 +106,12 @@ That's it — the system is now running.
 | `status` | Show this computer's local state (anchor flag, side, master ID, etc.) |
 | `redstone` | Print the current redstone input on every side (handy when debugging which computer is wired to the arrival sensor) |
 | `claim <side>` | Claim *this* computer as the anchor for *this* floor with the given side. Master accepts and re-broadcasts topology. |
+| `door add <side>` | Emit a sustained HIGH redstone signal on `<side>` while the elevator is at this floor's bucket (LOW otherwise). Wire pistons / sticky pistons / doors to that side. |
+| `door remove <side>` | Stop using a side as a door output |
+| `door list` | Show configured door sides on this computer |
+| `door clear` | Remove all door sides on this computer |
+
+Door sides are per-computer: each floor station configures its own (so you can have multiple doors on different computers around a single floor). Don't pick the same side as the anchor — call pulses would briefly drop the door signal. The setting persists in `floor_state.json`.
 
 Floor renames propagate instantly — every display in the elevator updates within ~2s.
 

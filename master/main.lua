@@ -587,6 +587,19 @@ local function cmdUnforget(args)
     print("Y=" .. y .. " no longer ignored. Floors there can re-register on their next heartbeat.")
 end
 
+local function cmdCall(args)
+    local n = tonumber(args[1])
+    if not n then print("Usage: call <floorNumber>"); return end
+    local lvl = getLevelByNumber(n)
+    if not lvl then print("Unknown floor " .. n); return end
+    -- Reuse the same path as a touch-call from a display.
+    handleElevatorCall(os.getComputerID(), {
+        floorNumber = n,
+        elevatorName = config.elevatorName,
+    })
+    print("Called elevator to floor " .. n .. " (" .. lvl.name .. ")")
+end
+
 local function cmdSetAnchor(args)
     local floorNum = tonumber(args[1])
     local computerId = tonumber(args[2])
@@ -660,6 +673,7 @@ local function cmdHelp()
     print("  recalibrate <Y>        - recalibrate a single level by Y coordinate")
     print("  rename <N> <name>      - rename floor N")
     print("  describe <N> <text>    - set description for floor N")
+    print("  call <N>               - call the cart to floor N")
     print("  setanchor <N> <id> <side> - manually set the anchor for floor N")
     print("  floorspacing <N>       - bucket Y values within N-1 blocks as one level")
     print("  forget <Y>             - ignore all floor computers at this Y")
@@ -681,6 +695,7 @@ local commands = {
     recalibrate = cmdRecalibrate,
     rename = cmdRename,
     describe = cmdDescribe,
+    call = cmdCall,
     setanchor = cmdSetAnchor,
     floorspacing = cmdFloorSpacing,
     forget = cmdForget,

@@ -54,6 +54,12 @@ local state = {
     pulseQueue = {},
     -- Calibration mode: when set, fire all sides and wait for input
     calibrating = false,
+    -- Door sides: when set, these emit a sustained HIGH while the elevator is
+    -- at this floor's bucket. Format: { side = true, side2 = true, ... }
+    doorSides = persisted.doorSides or {},
+    -- Cached floor Y of the elevator (from broadcasts) and our own canonical Y
+    elevatorCurrentY = nil,
+    myFloorY = nil,
 }
 
 for _, side in ipairs(protocol.SIDES) do state.lastInputs[side] = false end
@@ -64,7 +70,19 @@ local function persist()
         locY = locY,
         isAnchor = state.isAnchor,
         anchorSide = state.anchorSide,
+        doorSides = state.doorSides,
     })
+end
+
+-- Drive door outputs based on whether the elevator is at our floor bucket.
+local function applyDoors()
+    if not next(state.doorSides) then return end
+    local elevatorHere = state.elevatorCurrentY ~= nil
+                         and state.myFloorY ~= nil
+                         and state.elevatorCurrentY == state.myFloorY
+    for side, _ in pairs(state.doorSides) do
+        pcall(redstone.setOutput, side, elevatorHere)
+    end
 end
 
 -- ---------- Senders ----------
@@ -173,6 +191,7 @@ local function handleStatus(senderId, tbl)
         end
         if myEntry then
             state.floorNumber = myEntry.floorNumber
+            state.myFloorY = myEntry.floorY
             if myEntry.anchorComputerId == os.getComputerID() then
                 if not state.isAnchor or state.anchorSide ~= myEntry.anchorSide then
                     state.isAnchor = true
@@ -188,6 +207,10 @@ local function handleStatus(senderId, tbl)
             end
         end
     end
+
+    -- Cache current elevator floor Y for door logic.
+    state.elevatorCurrentY = tbl.currentFloor and tbl.currentFloor.floorY or nil
+    applyDoors()
 end
 
 local FIRE_DURATION = 0.5   -- seconds to assert output on all sides (short pulse)
@@ -266,6 +289,10 @@ local function handleCalibrateCall(senderId, tbl)
         log("CALIBRATE: call sent, no immediate input. Watching for rising edge...")
         -- state.calibrating stays true; redstoneMonitorTask handles real arrival.
     end
+
+    -- Restore door outputs (calibration's all-sides-off pulse will have forced
+    -- door sides LOW even if the elevator is here).
+    applyDoors()
 end
 
 local function handleReboot(senderId, tbl)
@@ -354,6 +381,8 @@ local function pulseTask()
             pcall(redstone.setOutput, side, true)
             sleep(1)
             pcall(redstone.setOutput, side, false)
+            -- If this side is also a door, restore its sustained state.
+            applyDoors()
         else
             sleep(0.1)
         end
@@ -377,6 +406,10 @@ local function replTask()
                 print("  status                - show current state")
                 print("  redstone              - show current redstone input on all sides")
                 print("  claim <side>          - claim this computer as the anchor for this floor")
+                print("  door add <side>       - emit sustained HIGH on <side> while elevator is here")
+                print("  door remove <side>    - stop using <side> as a door output")
+                print("  door list             - show configured door sides")
+                print("  door clear            - remove all door sides")
             elseif cmd == "rename" then
                 local newName = table.concat(args, " ")
                 if newName == "" then print("Usage: rename <name>") else
@@ -404,6 +437,55 @@ local function replTask()
                         newDescription = desc,
                     })
                     print("Sent description update.")
+                end
+            elseif cmd == "door" then
+                local sub = args[1] and args[1]:lower() or ""
+                local side = args[2]
+                local function validSide(s)
+                    if not s then return false end
+                    for _, ss in ipairs(protocol.SIDES) do if ss == s then return true end end
+                    return false
+                end
+                if sub == "list" then
+                    if not next(state.doorSides) then
+                        print("(no door sides configured)")
+                    else
+                        local sides = {}
+                        for s, _ in pairs(state.doorSides) do table.insert(sides, s) end
+                        table.sort(sides)
+                        print("Door sides: " .. table.concat(sides, ", "))
+                    end
+                elseif sub == "add" then
+                    if not validSide(side) then
+                        print("Side must be one of: " .. table.concat(protocol.SIDES, ", "))
+                    else
+                        state.doorSides[side] = true
+                        persist()
+                        applyDoors()
+                        print("Added door side: " .. side)
+                    end
+                elseif sub == "remove" then
+                    if not validSide(side) then
+                        print("Side must be one of: " .. table.concat(protocol.SIDES, ", "))
+                    else
+                        if state.doorSides[side] then
+                            state.doorSides[side] = nil
+                            persist()
+                            pcall(redstone.setOutput, side, false)
+                            print("Removed door side: " .. side)
+                        else
+                            print(side .. " was not configured as a door side")
+                        end
+                    end
+                elseif sub == "clear" then
+                    for s, _ in pairs(state.doorSides) do
+                        pcall(redstone.setOutput, s, false)
+                    end
+                    state.doorSides = {}
+                    persist()
+                    print("All door sides cleared")
+                else
+                    print("Usage: door add|remove|list|clear [side]")
                 end
             elseif cmd == "redstone" then
                 print("Redstone inputs (computer ID " .. os.getComputerID() .. "):")
@@ -440,9 +522,15 @@ local function replTask()
                 print("  elevatorName: " .. tostring(state.elevatorName))
                 print("  syncComputerId: " .. tostring(state.syncComputerId))
                 print("  floorNumber: " .. tostring(state.floorNumber))
+                print("  myFloorY: " .. tostring(state.myFloorY) .. "  (locY=" .. locY .. ")")
                 print("  isAnchor: " .. tostring(state.isAnchor))
                 print("  anchorSide: " .. tostring(state.anchorSide))
                 print("  registered: " .. tostring(state.isRegistered))
+                local doors = {}
+                for s, _ in pairs(state.doorSides) do table.insert(doors, s) end
+                table.sort(doors)
+                print("  doorSides: " .. (#doors > 0 and table.concat(doors, ", ") or "(none)"))
+                print("  elevatorCurrentY: " .. tostring(state.elevatorCurrentY))
             else
                 print("Unknown. Type 'help'. (Use Ctrl+T to terminate.)")
             end
